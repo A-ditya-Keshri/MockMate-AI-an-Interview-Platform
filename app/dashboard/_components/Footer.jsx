@@ -1,5 +1,5 @@
 import React from "react";
-import { CopyrightIcon, Github, Linkedin, Twitter } from "lucide-react";
+import { CopyrightIcon, Github } from "lucide-react";
 
 const Footer = () => {
   return (
@@ -16,31 +16,13 @@ const Footer = () => {
         {/* Social Media Links */}
         <div className="flex space-x-4">
           <a
-            href="https://github.com/mockmate"
+            href="https://github.com/A-ditya-Keshri/MockMate-AI-an-Interview-Platform"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-indigo-500 transition-colors"
             aria-label="GitHub"
           >
             <Github className="h-6 w-6" />
-          </a>
-          <a
-            href="https://linkedin.com/company/mockmate"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-indigo-500 transition-colors"
-            aria-label="LinkedIn"
-          >
-            <Linkedin className="h-6 w-6" />
-          </a>
-          <a
-            href="https://twitter.com/mockmate"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-indigo-500 transition-colors"
-            aria-label="Twitter"
-          >
-            <Twitter className="h-6 w-6" />
           </a>
         </div>
       </div>
