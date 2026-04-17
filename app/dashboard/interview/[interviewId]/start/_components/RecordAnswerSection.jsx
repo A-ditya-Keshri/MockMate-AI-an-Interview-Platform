@@ -85,7 +85,9 @@ const RecordAnswerSection = ({
       });
 
       if (!response.ok) {
-        throw new Error("Transcription failed");
+        const errorData = await response.json().catch(() => ({}));
+        console.error("Transcription server error:", errorData);
+        throw new Error(errorData.details || errorData.error || "Transcription failed");
       }
 
       const data = await response.json();
@@ -105,12 +107,13 @@ const RecordAnswerSection = ({
     } catch (error) {
       console.error("Transcription error:", error);
       toast.error("Failed to transcribe audio", {
-        description: "You can type your answer in the text box instead.",
+        description: error.message || "You can type your answer in the text box instead.",
       });
     } finally {
       setIsTranscribing(false);
     }
   };
+
 
   const StartStopRecording = async () => {
     if (isRecording) {
