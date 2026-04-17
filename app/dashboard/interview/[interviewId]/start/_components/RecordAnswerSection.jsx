@@ -1,6 +1,6 @@
 "use client";
 import { Button } from "@/components/ui/button";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Mic, StopCircle, Loader2, Camera, CameraOff } from "lucide-react";
 import { toast } from "sonner";
 import { db } from "@/utils/db";
@@ -20,8 +20,15 @@ const RecordAnswerSection = ({
   const [isRecording, setIsRecording] = useState(false);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
   const [webcamStream, setWebcamStream] = useState(null);
+  const [speechSupported, setSpeechSupported] = useState(true);
   const recognitionRef = useRef(null);
   const webcamRef = useRef(null);
+  const isRecordingRef = useRef(false); // track recording state for callbacks
+
+  // Keep isRecordingRef in sync
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   // Attach stream to video element whenever stream or ref changes
   useEffect(() => {
@@ -39,25 +46,31 @@ const RecordAnswerSection = ({
     };
   }, [webcamStream]);
 
-  const retryCountRef = useRef(0);
-  const maxRetries = 3;
+  // Check if SpeechRecognition is available
+  useEffect(() => {
+    const SpeechRecognition = 
+      typeof window !== "undefined" && 
+      (window.SpeechRecognition || window.webkitSpeechRecognition);
+    
+    if (!SpeechRecognition) {
+      setSpeechSupported(false);
+    }
+  }, []);
 
-  const initSpeechRecognition = () => {
+  // Create a fresh SpeechRecognition instance
+  const createRecognition = useCallback(() => {
     const SpeechRecognition = 
       typeof window !== "undefined" && 
       (window.SpeechRecognition || window.webkitSpeechRecognition);
 
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) return null;
 
-    recognitionRef.current = new SpeechRecognition();
-    const recognition = recognitionRef.current;
-
+    const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onresult = (event) => {
-      retryCountRef.current = 0; // Reset retries on success
       let finalTranscript = '';
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
@@ -71,40 +84,46 @@ const RecordAnswerSection = ({
     };
 
     recognition.onerror = (event) => {
-      if (event.error === 'network' && retryCountRef.current < maxRetries) {
-        retryCountRef.current++;
-        console.log(`Speech recognition network error, retrying (${retryCountRef.current}/${maxRetries})...`);
-        // Reinitialize and retry after a short delay
-        setTimeout(() => {
-          initSpeechRecognition();
-          try {
-            recognitionRef.current?.start();
-          } catch (e) {
-            console.error("Retry failed:", e);
-            setIsRecording(false);
-          }
-        }, 500);
-        return;
-      }
+      console.error("Speech recognition error:", event.error);
       
-      if (event.error === 'network') {
-        toast.error("Voice recording unavailable on localhost (Chrome limitation)", {
-          description: "Please type your answer in the text box below instead.",
+      if (event.error === 'not-allowed') {
+        toast.error("Microphone access denied", {
+          description: "Please allow microphone access in your browser settings and try again.",
           duration: 5000,
         });
+      } else if (event.error === 'network') {
+        toast.error("Speech recognition network error", {
+          description: "Could not connect to speech recognition service. Please check your internet connection and try again.",
+          duration: 5000,
+        });
+      } else if (event.error === 'no-speech') {
+        toast.info("No speech detected", {
+          description: "Please speak clearly into your microphone.",
+          duration: 3000,
+        });
       } else if (event.error !== 'aborted') {
-        toast.error(`Speech recognition error: ${event.error}`);
+        toast.error(`Speech recognition error: ${event.error}`, {
+          description: "You can type your answer in the text box below.",
+        });
       }
       setIsRecording(false);
     };
 
     recognition.onend = () => {
-      setIsRecording(false);
+      // If we're still supposed to be recording, restart (Chrome stops after ~60s of silence)
+      if (isRecordingRef.current) {
+        try {
+          recognition.start();
+        } catch (e) {
+          console.error("Failed to restart recognition:", e);
+          setIsRecording(false);
+        }
+      } else {
+        setIsRecording(false);
+      }
     };
-  };
 
-  useEffect(() => {
-    initSpeechRecognition();
+    return recognition;
   }, []);
 
   const EnableWebcam = async () => {
@@ -129,8 +148,8 @@ const RecordAnswerSection = ({
     setWebcamEnabled(false);
   };
 
-  const StartStopRecording = () => {
-    if (!recognitionRef.current) {
+  const StartStopRecording = async () => {
+    if (!speechSupported) {
       toast.error("Speech-to-text not supported in this browser", {
         description: "You can type your answer in the text box below."
       });
@@ -138,13 +157,45 @@ const RecordAnswerSection = ({
     }
 
     if (isRecording) {
-      recognitionRef.current.stop();
+      // Stop recording
+      if (recognitionRef.current) {
+        isRecordingRef.current = false;
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+      setIsRecording(false);
       toast.info("Recording stopped");
     } else {
+      // Request microphone permission first
       try {
-        recognitionRef.current.start();
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Stop the permission stream immediately - we just needed the permission
+        micStream.getTracks().forEach(track => track.stop());
+      } catch (err) {
+        console.error("Mic permission error:", err);
+        toast.error("Microphone access denied", {
+          description: "Please allow microphone permission in your browser settings and reload the page.",
+          duration: 5000,
+        });
+        return;
+      }
+
+      // Create a fresh recognition instance each time
+      const recognition = createRecognition();
+      if (!recognition) {
+        toast.error("Speech recognition not available", {
+          description: "You can type your answer in the text box below."
+        });
+        return;
+      }
+
+      recognitionRef.current = recognition;
+
+      try {
+        recognition.start();
         setIsRecording(true);
-        toast.info("Recording started");
+        isRecordingRef.current = true;
+        toast.info("Recording started — speak clearly into your microphone");
       } catch (error) {
         toast.error("Could not start recording", {
           description: "You can type your answer in the text box instead."
@@ -154,6 +205,17 @@ const RecordAnswerSection = ({
     }
   };
 
+  // Cleanup recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        isRecordingRef.current = false;
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
   const UpdateUserAnswer = async () => {
     if (!userAnswer.trim()) {
       toast.error("Please provide an answer");
@@ -161,6 +223,14 @@ const RecordAnswerSection = ({
     }
 
     setLoading(true);
+
+    // Stop recording if active
+    if (isRecording && recognitionRef.current) {
+      isRecordingRef.current = false;
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+      setIsRecording(false);
+    }
 
     try {
       const feedbackResponse = await fetch('/api/generate-feedback', {
@@ -197,10 +267,6 @@ const RecordAnswerSection = ({
       toast.success("Answer recorded successfully");
       
       setUserAnswer("");
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      setIsRecording(false);
     } catch (error) {
       toast.error("Failed to save answer", {
         description: error.message
@@ -270,7 +336,7 @@ const RecordAnswerSection = ({
 
       <textarea
         className="w-full h-32 p-4 mt-4 border rounded-md text-gray-800"
-        placeholder="Your answer will appear here..."
+        placeholder="Type or speak your answer here..."
         value={userAnswer}
         onChange={(e) => setUserAnswer(e.target.value)}
       />
