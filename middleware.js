@@ -5,6 +5,7 @@ const isProtectedRoute = createRouteMatcher([
   '/dashboard(.*)',           // Protects all routes starting with /dashboard
   '/api/generate-interview',  // Explicitly protect your API route
   '/api/generate-feedback',   // Protect the feedback API route
+  '/api/transcribe-audio',    // Protect the audio transcription route
 ]);
 
 export default clerkMiddleware((auth, req) => {

@@ -1,6 +1,6 @@
 "use client";
 import { Button } from "@/components/ui/button";
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Mic, StopCircle, Loader2, Camera, CameraOff } from "lucide-react";
 import { toast } from "sonner";
 import { db } from "@/utils/db";
@@ -18,17 +18,12 @@ const RecordAnswerSection = ({
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
   const [webcamStream, setWebcamStream] = useState(null);
-  const [speechSupported, setSpeechSupported] = useState(true);
-  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const webcamRef = useRef(null);
-  const isRecordingRef = useRef(false); // track recording state for callbacks
-
-  // Keep isRecordingRef in sync
-  useEffect(() => {
-    isRecordingRef.current = isRecording;
-  }, [isRecording]);
 
   // Attach stream to video element whenever stream or ref changes
   useEffect(() => {
@@ -46,84 +41,13 @@ const RecordAnswerSection = ({
     };
   }, [webcamStream]);
 
-  // Check if SpeechRecognition is available
+  // Cleanup media recorder on unmount
   useEffect(() => {
-    const SpeechRecognition = 
-      typeof window !== "undefined" && 
-      (window.SpeechRecognition || window.webkitSpeechRecognition);
-    
-    if (!SpeechRecognition) {
-      setSpeechSupported(false);
-    }
-  }, []);
-
-  // Create a fresh SpeechRecognition instance
-  const createRecognition = useCallback(() => {
-    const SpeechRecognition = 
-      typeof window !== "undefined" && 
-      (window.SpeechRecognition || window.webkitSpeechRecognition);
-
-    if (!SpeechRecognition) return null;
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onresult = (event) => {
-      let finalTranscript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript + ' ';
-        }
-      }
-
-      if (finalTranscript.trim()) {
-        setUserAnswer(prev => (prev + ' ' + finalTranscript).trim());
+    return () => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
       }
     };
-
-    recognition.onerror = (event) => {
-      console.error("Speech recognition error:", event.error);
-      
-      if (event.error === 'not-allowed') {
-        toast.error("Microphone access denied", {
-          description: "Please allow microphone access in your browser settings and try again.",
-          duration: 5000,
-        });
-      } else if (event.error === 'network') {
-        toast.error("Speech recognition network error", {
-          description: "Could not connect to speech recognition service. Please check your internet connection and try again.",
-          duration: 5000,
-        });
-      } else if (event.error === 'no-speech') {
-        toast.info("No speech detected", {
-          description: "Please speak clearly into your microphone.",
-          duration: 3000,
-        });
-      } else if (event.error !== 'aborted') {
-        toast.error(`Speech recognition error: ${event.error}`, {
-          description: "You can type your answer in the text box below.",
-        });
-      }
-      setIsRecording(false);
-    };
-
-    recognition.onend = () => {
-      // If we're still supposed to be recording, restart (Chrome stops after ~60s of silence)
-      if (isRecordingRef.current) {
-        try {
-          recognition.start();
-        } catch (e) {
-          console.error("Failed to restart recognition:", e);
-          setIsRecording(false);
-        }
-      } else {
-        setIsRecording(false);
-      }
-    };
-
-    return recognition;
   }, []);
 
   const EnableWebcam = async () => {
@@ -148,73 +72,115 @@ const RecordAnswerSection = ({
     setWebcamEnabled(false);
   };
 
-  const StartStopRecording = async () => {
-    if (!speechSupported) {
-      toast.error("Speech-to-text not supported in this browser", {
-        description: "You can type your answer in the text box below."
+  const transcribeAudio = async (audioBlob) => {
+    setIsTranscribing(true);
+    try {
+      const formData = new FormData();
+      formData.append("audio", audioBlob, "recording.webm");
+
+      const response = await fetch("/api/transcribe-audio", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
       });
-      return;
-    }
 
-    if (isRecording) {
-      // Stop recording
-      if (recognitionRef.current) {
-        isRecordingRef.current = false;
-        recognitionRef.current.stop();
-        recognitionRef.current = null;
+      if (!response.ok) {
+        throw new Error("Transcription failed");
       }
-      setIsRecording(false);
-      toast.info("Recording stopped");
-    } else {
-      // Request microphone permission first
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Stop the permission stream immediately - we just needed the permission
-        micStream.getTracks().forEach(track => track.stop());
-      } catch (err) {
-        console.error("Mic permission error:", err);
-        toast.error("Microphone access denied", {
-          description: "Please allow microphone permission in your browser settings and reload the page.",
-          duration: 5000,
+
+      const data = await response.json();
+      const transcribedText = data.text?.trim() || "";
+
+      if (transcribedText) {
+        setUserAnswer(prev => {
+          const combined = prev ? prev + " " + transcribedText : transcribedText;
+          return combined.trim();
         });
-        return;
-      }
-
-      // Create a fresh recognition instance each time
-      const recognition = createRecognition();
-      if (!recognition) {
-        toast.error("Speech recognition not available", {
-          description: "You can type your answer in the text box below."
+        toast.success("Audio transcribed successfully");
+      } else {
+        toast.info("No speech detected in recording", {
+          description: "Please try speaking louder or closer to your microphone.",
         });
-        return;
       }
-
-      recognitionRef.current = recognition;
-
-      try {
-        recognition.start();
-        setIsRecording(true);
-        isRecordingRef.current = true;
-        toast.info("Recording started — speak clearly into your microphone");
-      } catch (error) {
-        toast.error("Could not start recording", {
-          description: "You can type your answer in the text box instead."
-        });
-        console.error("Recording start error:", error);
-      }
+    } catch (error) {
+      console.error("Transcription error:", error);
+      toast.error("Failed to transcribe audio", {
+        description: "You can type your answer in the text box instead.",
+      });
+    } finally {
+      setIsTranscribing(false);
     }
   };
 
-  // Cleanup recognition on unmount
-  useEffect(() => {
-    return () => {
-      if (recognitionRef.current) {
-        isRecordingRef.current = false;
-        recognitionRef.current.stop();
-        recognitionRef.current = null;
+  const StartStopRecording = async () => {
+    if (isRecording) {
+      // Stop recording
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
       }
-    };
-  }, []);
+      setIsRecording(false);
+      toast.info("Recording stopped — transcribing...");
+    } else {
+      // Start recording
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // Determine best supported MIME type
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : 'audio/mp4';
+
+        const mediaRecorder = new MediaRecorder(stream, { mimeType });
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+          // Stop all mic tracks
+          stream.getTracks().forEach(track => track.stop());
+
+          const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+          audioChunksRef.current = [];
+
+          if (audioBlob.size > 0) {
+            await transcribeAudio(audioBlob);
+          }
+        };
+
+        mediaRecorder.onerror = (event) => {
+          console.error("MediaRecorder error:", event.error);
+          toast.error("Recording error occurred");
+          setIsRecording(false);
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        // Collect data every second for reliability
+        mediaRecorder.start(1000);
+        setIsRecording(true);
+        toast.info("Recording started — speak clearly into your microphone");
+      } catch (err) {
+        console.error("Mic access error:", err);
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          toast.error("Microphone access denied", {
+            description: "Please allow microphone permission in your browser settings and reload the page.",
+            duration: 5000,
+          });
+        } else {
+          toast.error("Could not access microphone", {
+            description: "Please check that your microphone is connected and working.",
+            duration: 5000,
+          });
+        }
+      }
+    }
+  };
 
   const UpdateUserAnswer = async () => {
     if (!userAnswer.trim()) {
@@ -225,10 +191,8 @@ const RecordAnswerSection = ({
     setLoading(true);
 
     // Stop recording if active
-    if (isRecording && recognitionRef.current) {
-      isRecordingRef.current = false;
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+    if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
       setIsRecording(false);
     }
 
@@ -279,10 +243,12 @@ const RecordAnswerSection = ({
 
   return (
     <div className="flex justify-center items-center flex-col relative">
-      {loading && (
+      {(loading || isTranscribing) && (
         <div className="fixed inset-0 bg-black/70 z-[9999] flex flex-col justify-center items-center">
           <Loader2 className="h-16 w-16 animate-spin text-white mb-4" />
-          <p className="text-white text-lg">Saving your answer...</p>
+          <p className="text-white text-lg">
+            {isTranscribing ? "Transcribing your audio..." : "Saving your answer..."}
+          </p>
         </div>
       )}
       <div className="flex flex-col my-20 justify-center items-center bg-black rounded-lg p-5">
@@ -318,7 +284,7 @@ const RecordAnswerSection = ({
       </div>
 
       <Button
-        disabled={loading}
+        disabled={loading || isTranscribing}
         variant="outline"
         className="my-10"
         onClick={StartStopRecording}
@@ -344,7 +310,7 @@ const RecordAnswerSection = ({
       <Button
         className="mt-4"
         onClick={UpdateUserAnswer}
-        disabled={loading || !userAnswer.trim()}
+        disabled={loading || isTranscribing || !userAnswer.trim()}
       >
         {loading ? (
           <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</>
